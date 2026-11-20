@@ -1,0 +1,47 @@
+name: Windows exe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: write
+
+jobs:
+  exe:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      - name: Build desktop app (createDistributable)
+        run: gradle createDistributable --no-daemon --stacktrace
+
+      - name: Zip app folder with YouCode.exe
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Recurse -Filter YouCode.exe build\compose | Select-Object -First 1
+          if (-not $exe) { throw "YouCode.exe not found under build\compose" }
+          Write-Host "Found $($exe.FullName)"
+          $dir = $exe.Directory.FullName
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Compress-Archive -Path (Join-Path $dir '*') -DestinationPath out\YouCode-Windows.zip -Force
+          Get-Item out\YouCode-Windows.zip | Format-List Name,Length
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: pc-build-${{ github.run_number }}
+          name: YouCode PC build ${{ github.run_number }}
+          files: out/YouCode-Windows.zip
+          fail_on_unmatched_files: true
