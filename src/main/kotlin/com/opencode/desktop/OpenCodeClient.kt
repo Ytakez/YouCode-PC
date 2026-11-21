@@ -13,7 +13,15 @@ import java.net.URLEncoder
 import java.util.Base64
 import java.util.concurrent.TimeUnit
 
-data class OcModel(val id: String, val name: String, val providerId: String)
+data class OcModel(val id: String, val name: String, val providerId: String) {
+    /** Как в телефонной версии: бесплатные модели OpenCode Zen (работают без ключа). */
+    val isFree: Boolean get() = providerId == "opencode" && (id.endsWith("-free") || id == "big-pickle")
+}
+
+/** Бесплатные модели первыми (как выбор по умолчанию на телефоне), остальные по алфавиту. */
+private fun List<OcModel>.freeFirst(): List<OcModel> =
+    distinctBy { "${it.providerId}/${it.id}" }
+        .sortedWith(compareByDescending<OcModel> { it.isFree }.thenBy { it.name.lowercase() })
 
 /**
  * Talks to a local or remote `opencode serve` instance (same HTTP API as on Android).
@@ -253,7 +261,7 @@ class OpenCodeClient {
                 fromCatalog += OcModel(id, item.optString("name").ifBlank { id }, providerId)
             }
             if (fromCatalog.isNotEmpty()) {
-                return@withContext fromCatalog.distinctBy { "${it.providerId}/${it.id}" }.sortedBy { it.name.lowercase() }
+                return@withContext fromCatalog.freeFirst()
             }
         }
         val json = get("api/provider")
@@ -287,7 +295,7 @@ class OpenCodeClient {
                 }
             }
         }
-        out.distinctBy { "${it.providerId}/${it.id}" }.sortedBy { it.name.lowercase() }
+        out.freeFirst()
     }
 
     suspend fun createSession(title: String, model: OcModel, firstPrompt: String = title): String = withContext(Dispatchers.IO) {
@@ -365,8 +373,11 @@ class OpenCodeClient {
             var unchanged = 0
             var emptyPolls = 0
             var settled = 0
+            var lastRetry = ""
             while (System.currentTimeMillis() < deadline) {
                 val listing = get("api/session/$sid/message?limit=100")
+                val retryNow = retryInfo(listing)
+                if (retryNow != null) lastRetry = retryNow
                 val current = extractAssistantAfter(listing, beforeLastKey)
                 val afterIndex = assistantStartIndex(listing, beforeLastKey)
                 assistantError(listing, afterIndex)?.let { throw IllegalStateException("Модель вернула ошибку: $it") }
@@ -389,8 +400,15 @@ class OpenCodeClient {
                         if (unchanged >= 12 && !assistantMessagesExposeCompletion(listing, afterIndex)) break
                     }
                 } else {
-                    if (++emptyPolls >= 80) {
-                        throw IllegalStateException("Модель не начала отвечать за 2 минуты. Проверь выбранную модель и подключение провайдера в OpenCode.")
+                    // Как на телефоне: сообщение ассистента уже есть (модель думает / вызывает инструмент),
+                    // просто текста пока нет — это не «зависла», счётчик ожидания сбрасываем.
+                    if (sessionHasAssistantMessage(listing, afterIndex) && retryNow == null) {
+                        emptyPolls = 0
+                    } else if (++emptyPolls >= 80) {
+                        throw IllegalStateException(
+                            "Модель не начала отвечать за 2 минуты. Проверь выбранную модель и подключение провайдера в OpenCode." +
+                                if (lastRetry.isNotBlank()) "\nПоследняя ошибка провайдера: $lastRetry" else ""
+                        )
                     }
                 }
                 delay(1500)
@@ -548,7 +566,7 @@ class OpenCodeClient {
             val text = buildString {
                 for (j in 0 until parts.length()) {
                     val part = parts.optJSONObject(j) ?: continue
-                    if (part.optString("type") == "text") append(part.optString("text"))
+                    if (part.optString("type").let { it == "text" || it.isEmpty() }) append(part.optString("text"))
                 }
             }.ifBlank { message.optString("text").ifBlank { message.optString("content") } }
             if (text.isNotBlank()) result += text.trim()
@@ -577,6 +595,26 @@ class OpenCodeClient {
             if (message.optJSONObject("retry") != null) return null
             val error = message.optJSONObject("error") ?: return null
             return error.optString("message").ifBlank { error.optString("name") }.ifBlank { "неизвестная ошибка" }
+        }
+        return null
+    }
+
+    private fun sessionHasAssistantMessage(payload: JSONObject, fromIndex: Int): Boolean {
+        val arr = messageArray(payload)
+        for (i in fromIndex.coerceAtLeast(0) until arr.length()) {
+            if (isAssistant(arr.optJSONObject(i) ?: continue)) return true
+        }
+        return false
+    }
+
+    /** Текст ретрая/ошибки провайдера, пока OpenCode повторяет запрос: иначе причина скрыта до таймаута. */
+    private fun retryInfo(payload: JSONObject): String? {
+        val arr = messageArray(payload)
+        for (i in arr.length() - 1 downTo 0) {
+            val message = arr.optJSONObject(i) ?: continue
+            if (!isAssistant(message)) continue
+            val retry = message.optJSONObject("retry") ?: return null
+            return retry.optString("message").ifBlank { retry.optString("error") }.ifBlank { "повтор запроса к провайдеру" }
         }
         return null
     }
