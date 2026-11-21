@@ -1,4 +1,4 @@
-name: Windows exe
+name: Windows exe (signed)
 
 on:
   workflow_dispatch:
@@ -27,13 +27,42 @@ jobs:
       - name: Build desktop app (createDistributable)
         run: gradle createDistributable --no-daemon --stacktrace
 
+      - name: Sign YouCode.exe
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "codesign.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String("${{ secrets.CODE_SIGN_PFX }}"))
+          $pass = "${{ secrets.CODE_SIGN_PASSWORD }}"
+
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "\\x64\\" } | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe | Select-Object -First 1 }
+          if (-not $signtool) { throw "signtool.exe not found" }
+          Write-Host "signtool: $($signtool.FullName)"
+
+          $exe = Get-ChildItem -Recurse -Filter YouCode.exe build\compose | Select-Object -First 1
+          if (-not $exe) { throw "YouCode.exe not found under build\compose" }
+          Write-Host "exe: $($exe.FullName)"
+
+          & $signtool.FullName sign /f $pfx /p $pass /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /d "YouCode" "$($exe.FullName)"
+          if ($LASTEXITCODE -ne 0) { throw "signtool sign failed with exit code $LASTEXITCODE" }
+
+          Write-Host "--- signature ---"
+          & $signtool.FullName verify /pa "$($exe.FullName)"
+          Get-AuthenticodeSignature "$($exe.FullName)" | Format-List Status,StatusMessage,@{n='Subject';e={$_.SignerCertificate.Subject}}
+
       - name: Zip app folder with YouCode.exe
         shell: pwsh
         run: |
           $exe = Get-ChildItem -Recurse -Filter YouCode.exe build\compose | Select-Object -First 1
           if (-not $exe) { throw "YouCode.exe not found under build\compose" }
-          Write-Host "Found $($exe.FullName)"
           $dir = $exe.Directory.FullName
+          Write-Host "Packing $dir"
+
+          Copy-Item signing\YouCode-CodeSigning.cer (Join-Path $dir "YouCode-CodeSigning.cer") -Force
+          Copy-Item signing\install-certificate.ps1 (Join-Path $dir "install-certificate.ps1") -Force
+          Copy-Item signing\install-certificate.cmd (Join-Path $dir "install-certificate.cmd") -Force
+
           New-Item -ItemType Directory -Force -Path out | Out-Null
           Compress-Archive -Path (Join-Path $dir '*') -DestinationPath out\YouCode-Windows.zip -Force
           Get-Item out\YouCode-Windows.zip | Format-List Name,Length
