@@ -1,6 +1,9 @@
 package com.opencode.desktop
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -11,10 +14,24 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
+import androidx.compose.ui.window.WindowPlacement
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import kotlinx.coroutines.CancellationException
@@ -24,6 +41,10 @@ import java.awt.Desktop
 import java.awt.Toolkit
 import java.awt.datatransfer.StringSelection
 import java.net.URI
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.EncodeHintType
+import com.google.zxing.qrcode.QRCodeWriter
+import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
 
 data class Msg(val id: String, val text: String, val isUser: Boolean, val model: String? = null)
 
@@ -31,6 +52,7 @@ fun main() = application {
     val auth = remember { AuthManager() }
     var session by remember { mutableStateOf(auth.currentSession()) }
     val oc = remember { OpenCodeClient() }
+    val windowState = rememberWindowState(width = 960.dp, height = 720.dp)
 
     LaunchedEffect(Unit) {
         if (session != null) {
@@ -46,7 +68,7 @@ fun main() = application {
             exitApplication()
         },
         title = "YouCode Desktop",
-        state = rememberWindowState(width = 960.dp, height = 720.dp)
+        state = windowState
     ) {
         MaterialTheme(
             colorScheme = darkColorScheme(
@@ -64,6 +86,13 @@ fun main() = application {
                     ChatPane(
                         session = session!!,
                         oc = oc,
+                        onToggleFullscreen = {
+                            windowState.placement = if (windowState.placement == WindowPlacement.Fullscreen) {
+                                WindowPlacement.Floating
+                            } else {
+                                WindowPlacement.Fullscreen
+                            }
+                        },
                         onSignOut = {
                             auth.signOut()
                             session = null
@@ -83,7 +112,7 @@ private fun LoginPane(auth: AuthManager, onOk: (AuthSession) -> Unit) {
     var link by remember { mutableStateOf<String?>(null) }
 
     Column(
-        Modifier.fillMaxSize().padding(40.dp),
+        Modifier.fillMaxSize().padding(if (link != null) 20.dp else 40.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
@@ -93,34 +122,63 @@ private fun LoginPane(auth: AuthManager, onOk: (AuthSession) -> Unit) {
             "Вход только через Telegram. Подтверждение — на телефоне в боте.",
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
         )
-        Spacer(Modifier.height(28.dp))
-        Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            modifier = Modifier.widthIn(max = 520.dp).fillMaxWidth()
-        ) {
-            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Как подтвердить на телефоне", fontWeight = FontWeight.SemiBold)
-                Text("1. Нажми «Войти через Telegram»")
-                Text("2. Открой ссылку на телефоне (Telegram или браузер)")
-                Text("3. В боте нажми подтверждение входа")
-                Text("4. Вернись к этому окну — вход завершится сам")
-                Text("Не закрывай приложение, пока идёт ожидание.")
-            }
-        }
-        link?.let { url ->
-            Spacer(Modifier.height(16.dp))
-            Text("Ссылка для телефона", fontWeight = FontWeight.SemiBold)
-            SelectionContainer {
-                Text(url, color = MaterialTheme.colorScheme.primary)
-            }
-            TextButton(onClick = {
-                runCatching {
-                    Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(url), null)
+        Spacer(Modifier.height(if (link != null) 14.dp else 28.dp))
+        val qrLink = link
+        if (qrLink == null) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                modifier = Modifier.widthIn(max = 520.dp).fillMaxWidth()
+            ) {
+                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Как подтвердить на телефоне", fontWeight = FontWeight.SemiBold)
+                    Text("1. Нажми «Войти через Telegram» — появится QR-код")
+                    Text("2. Отсканируй его камерой телефона")
+                    Text("3. В боте нажми подтверждение входа")
+                    Text("4. Вернись к этому окну — вход завершится сам")
+                    Text("Не закрывай приложение, пока идёт ожидание.")
                 }
-            }) { Text("Скопировать ссылку") }
+            }
+        } else {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                modifier = Modifier.widthIn(max = 520.dp).fillMaxWidth()
+            ) {
+                Column(
+                    Modifier.padding(16.dp).fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        "Сканируйте QR-код с телефона и войдите в аккаунт",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        textAlign = TextAlign.Center
+                    )
+                    Text(
+                        "Наведите камеру телефона на код, откройте ссылку в Telegram и нажмите подтверждение входа в боте.",
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                        style = MaterialTheme.typography.bodyMedium,
+                        textAlign = TextAlign.Center
+                    )
+                    QrCode(qrLink, Modifier.size(196.dp))
+                    Text(
+                        "Код действует 5 минут",
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        TextButton(onClick = {
+                            runCatching {
+                                Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(qrLink), null)
+                            }
+                        }) { Text("Скопировать ссылку") }
+                        TextButton(onClick = { openTelegramLink(qrLink) }) { Text("Открыть на этом компьютере") }
+                    }
+                }
+            }
         }
         Spacer(Modifier.height(16.dp))
-        if (waiting) {
+        if (waiting && link == null) {
             CircularProgressIndicator()
             Spacer(Modifier.height(12.dp))
             Text("Ждём подтверждение на телефоне…")
@@ -137,19 +195,28 @@ private fun LoginPane(auth: AuthManager, onOk: (AuthSession) -> Unit) {
                 scope.launch {
                     waiting = true
                     try {
+                        link = null
                         val login = auth.startTelegramLogin()
                         link = login.url
-                        openTelegramLink(login.url)
-                        // TTL ссылки на сервере — 10 минут. Первый опрос сразу.
-                        repeat(300) { attempt ->
-                            if (attempt > 0) delay(2000)
-                            val s = auth.pollTelegramLogin(login.token)
-                            if (s != null) {
-                                onOk(s)
-                                return@launch
+                        // Тот же таймаут и ритм опроса, что и в телефонной версии: 5 минут, раз в 2 секунды.
+                        val deadline = System.currentTimeMillis() + 5 * 60 * 1000L
+                        var serverErrors = 0
+                        while (System.currentTimeMillis() < deadline) {
+                            delay(2000)
+                            try {
+                                val s = auth.pollTelegramLogin(login.token)
+                                serverErrors = 0
+                                if (s != null) {
+                                    onOk(s)
+                                    return@launch
+                                }
+                            } catch (e: AuthHttpException) {
+                                // Повторяем временные 5xx, как в Android AuthScreen.
+                                if (e.code in 500..599 && ++serverErrors < 5) continue
+                                throw e
                             }
                         }
-                        error = "Время вышло. Подтверди вход в боте на телефоне и нажми ещё раз."
+                        error = "Время ожидания вышло. Попробуйте ещё раз."
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
@@ -162,7 +229,39 @@ private fun LoginPane(auth: AuthManager, onOk: (AuthSession) -> Unit) {
             enabled = !waiting,
             modifier = Modifier.height(48.dp)
         ) {
-            Text(if (waiting) "Ожидаем телефон…" else "Войти через Telegram")
+            Text(if (waiting) "Ожидаем телефон…" else if (link != null) "Создать новый QR-код" else "Войти через Telegram")
+        }
+    }
+}
+
+@Composable
+private fun QrCode(content: String, modifier: Modifier = Modifier) {
+    val matrix = remember(content) {
+        runCatching {
+            QRCodeWriter().encode(
+                content, BarcodeFormat.QR_CODE, 0, 0,
+                mapOf(
+                    EncodeHintType.ERROR_CORRECTION to ErrorCorrectionLevel.M,
+                    EncodeHintType.CHARACTER_SET to "UTF-8"
+                )
+            )
+        }.getOrNull()
+    }
+    Box(modifier.background(Color.White, RoundedCornerShape(16.dp)).padding(10.dp), contentAlignment = Alignment.Center) {
+        if (matrix != null) {
+            Canvas(Modifier.fillMaxSize()) {
+                val n = matrix.width
+                val cell = size.minDimension / n
+                for (y in 0 until n) {
+                    for (x in 0 until n) {
+                        if (matrix[x, y]) {
+                            drawRect(Color.Black, Offset(x * cell, y * cell), Size(cell + 0.6f, cell + 0.6f))
+                        }
+                    }
+                }
+            }
+        } else {
+            Text("Не удалось создать QR-код. Скопируй ссылку.", color = Color.Black, textAlign = TextAlign.Center)
         }
     }
 }
@@ -176,7 +275,7 @@ private fun openTelegramLink(url: String) {
 }
 
 @Composable
-private fun ChatPane(session: AuthSession, oc: OpenCodeClient, onSignOut: () -> Unit) {
+private fun ChatPane(session: AuthSession, oc: OpenCodeClient, onToggleFullscreen: () -> Unit, onSignOut: () -> Unit) {
     val scope = rememberCoroutineScope()
     val store = remember { ChatStore() }
     var chats by remember {
@@ -194,8 +293,17 @@ private fun ChatPane(session: AuthSession, oc: OpenCodeClient, onSignOut: () -> 
     var engineNote by remember { mutableStateOf("Подключение к OpenCode…") }
     var serverUrl by remember { mutableStateOf(oc.baseUrl) }
     var serverPassword by remember { mutableStateOf("") }
-    var showServerSettings by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
+    val inputFocus = remember { FocusRequester() }
+
+    val page = Color(0xFF101216)
+    val sidebar = Color(0xFF171A20)
+    val panel = Color(0xFF1B1F27)
+    val panelSoft = Color(0xFF222833)
+    val accent = Color(0xFFB7C8FF)
+    val textMain = Color(0xFFE4E7F0)
+    val textMuted = Color(0xFF9AA3B2)
 
     fun updateChat(updated: ChatThread) {
         chats = (listOf(updated.copy(updatedAt = System.currentTimeMillis())) + chats.filterNot { it.id == updated.id })
@@ -205,8 +313,8 @@ private fun ChatPane(session: AuthSession, oc: OpenCodeClient, onSignOut: () -> 
     LaunchedEffect(Unit) {
         val start = oc.startLocalIfPossible()
         engineNote = when (start) {
-            "started", "already" -> "OpenCode: ${oc.baseUrl}"
-            "not_found" -> "opencode не найден. Установи OpenCode CLI или подключи сервер."
+            "started", "already" -> "OpenCode подключён · ${oc.baseUrl}"
+            "not_found" -> "OpenCode не найден. Установи OpenCode CLI или подключи сервер."
             else -> "OpenCode: $start"
         }
         if (oc.ping()) {
@@ -227,69 +335,194 @@ private fun ChatPane(session: AuthSession, oc: OpenCodeClient, onSignOut: () -> 
         if (activeChat.messages.isNotEmpty()) listState.animateScrollToItem(activeChat.messages.lastIndex)
     }
 
-    Row(Modifier.fillMaxSize()) {
-        // Persistent conversation navigation
+    fun newChat() {
+                    if (!busy) {
+                        val chat = ChatThread(title = "Новый чат")
+                        chats = listOf(chat) + chats
+                        selectedId = chat.id
+                        input = ""
+                        store.save(chats)
+                    }
+    }
+
+    fun sendMessage() {
+                                    val prompt = input.trim()
+                                    if (prompt.isEmpty() || busy) return
+                                    val selectedModel = model ?: models.firstOrNull()
+                                    if (selectedModel == null) { status = "Нет доступных моделей. Проверь OpenCode."; return }
+                                    model = selectedModel
+                                    val userMessage = Msg(java.util.UUID.randomUUID().toString(), prompt, true)
+                                    val newTitle = if (activeChat.messages.isEmpty()) prompt.take(42).let { if (prompt.length > 42) "$it…" else it } else activeChat.title
+                                    var workingChat = activeChat.copy(
+                                        title = newTitle,
+                                        messages = activeChat.messages + userMessage,
+                                        modelId = selectedModel.id,
+                                        providerId = selectedModel.providerId,
+                                        modelName = selectedModel.name
+                                    )
+                                    updateChat(workingChat)
+                                    input = ""
+                                    busy = true
+                                    scope.launch {
+                                        try {
+                                            var sid = workingChat.openCodeSessionId
+                                            if (sid.isNullOrBlank()) {
+                                                status = "Создаю сессию…"
+                                                sid = oc.createSession(workingChat.title, selectedModel, prompt)
+                                                workingChat = workingChat.copy(openCodeSessionId = sid)
+                                                updateChat(workingChat)
+                                            }
+                                            val answer = oc.chat(sid, selectedModel, prompt) { status = it }
+                                            workingChat = workingChat.copy(messages = workingChat.messages + Msg(java.util.UUID.randomUUID().toString(), answer, false, selectedModel.name))
+                                            updateChat(workingChat)
+                                        } catch (e: CancellationException) {
+                                            throw e
+                                        } catch (e: Exception) {
+                                            workingChat = workingChat.copy(messages = workingChat.messages + Msg(java.util.UUID.randomUUID().toString(), "Ошибка: ${e.message ?: "неизвестная ошибка"}", false))
+                                            updateChat(workingChat)
+                                        } finally {
+                                            busy = false
+                                            status = ""
+                                        }
+                                    }
+    }
+
+    LaunchedEffect(busy, selectedId) {
+        if (!busy) {
+            delay(80)
+            runCatching { inputFocus.requestFocus() }
+        }
+    }
+
+    Box(Modifier.fillMaxSize()) {
+    Row(
+        Modifier.fillMaxSize().background(page).onPreviewKeyEvent { e ->
+            if (e.type != KeyEventType.KeyDown) false
+            else when {
+                e.isCtrlPressed && e.key == Key.N -> { newChat(); true }
+                e.key == Key.Escape && showSettings -> { showSettings = false; true }
+                else -> false
+            }
+        }
+    ) {
+        // Navigation rail / chat history
         Column(
-            Modifier.width(245.dp).fillMaxHeight().background(MaterialTheme.colorScheme.surface).padding(10.dp)
+            Modifier.width(264.dp).fillMaxHeight().background(sidebar).padding(16.dp)
         ) {
-            Text("YouCode", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(10.dp))
-            Button(onClick = {
-                if (!busy) {
-                    val chat = ChatThread(title = "Новый чат")
-                    chats = listOf(chat) + chats
-                    selectedId = chat.id
-                    input = ""
-                    store.save(chats)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp)) {
+                Surface(shape = RoundedCornerShape(13.dp), color = Color(0xFF303B55)) {
+                    Text("Y", Modifier.padding(horizontal = 13.dp, vertical = 8.dp), color = accent, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleLarge)
                 }
-            }, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Text("＋ Новый чат") }
-            Spacer(Modifier.height(12.dp))
-            Text("История", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.height(6.dp))
-            LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Column {
+                    Text("YouCode", color = textMain, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Text("DESKTOP", color = textMuted, style = MaterialTheme.typography.labelSmall, letterSpacing = androidx.compose.ui.unit.TextUnit.Unspecified)
+                }
+            }
+            Spacer(Modifier.height(22.dp))
+            Button(
+                onClick = { newChat() },
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD5DEFF), contentColor = Color(0xFF202B48))
+            ) {
+                Text("＋", style = MaterialTheme.typography.titleLarge)
+                Spacer(Modifier.width(8.dp))
+                Text("Новый чат", fontWeight = FontWeight.SemiBold)
+            }
+            Spacer(Modifier.height(25.dp))
+            Text("БИБЛИОТЕКА", color = textMuted, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(9.dp))
+            Row(
+                Modifier.fillMaxWidth().background(Color(0xFF293143), RoundedCornerShape(12.dp)).padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("◷", color = accent)
+                Spacer(Modifier.width(10.dp))
+                Text("История чатов", color = textMain, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                Spacer(Modifier.weight(1f))
+                Text("${chats.size}", color = textMuted, style = MaterialTheme.typography.labelSmall)
+            }
+            Spacer(Modifier.height(10.dp))
+            LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                 items(chats, key = { it.id }) { chat ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    val selected = chat.id == selectedId
+                    Row(
+                        Modifier.fillMaxWidth()
+                            .background(if (selected) Color(0xFF293143) else Color.Transparent, RoundedCornerShape(12.dp))
+                            .padding(start = 4.dp, end = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         TextButton(
                             onClick = { if (!busy) { selectedId = chat.id; input = "" } },
                             enabled = !busy,
                             modifier = Modifier.weight(1f),
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 7.dp)
+                            contentPadding = PaddingValues(horizontal = 9.dp, vertical = 9.dp)
                         ) {
                             Text(
-                                (if (chat.id == selectedId) "● " else "") + chat.title,
+                                chat.title,
                                 maxLines = 2,
-                                color = if (chat.id == selectedId) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                color = if (selected) accent else textMuted,
+                                style = MaterialTheme.typography.bodyMedium
                             )
                         }
-                        TextButton(onClick = {
-                            if (!busy) {
-                                val remaining = chats.filterNot { it.id == chat.id }
-                                chats = if (remaining.isEmpty()) listOf(ChatThread(title = "Новый чат")) else remaining
-                                if (selectedId == chat.id) selectedId = chats.first().id
-                                store.save(chats)
-                            }
-                        }, enabled = !busy) { Text("×") }
+                        TextButton(
+                            onClick = {
+                                if (!busy) {
+                                    val remaining = chats.filterNot { it.id == chat.id }
+                                    chats = if (remaining.isEmpty()) listOf(ChatThread(title = "Новый чат")) else remaining
+                                    if (selectedId == chat.id) selectedId = chats.first().id
+                                    store.save(chats)
+                                }
+                            },
+                            enabled = !busy,
+                            contentPadding = PaddingValues(horizontal = 8.dp)
+                        ) { Text("×", color = textMuted) }
                     }
                 }
             }
-            Divider()
-            TextButton(onClick = { showServerSettings = !showServerSettings }) { Text("Настройки сервера") }
-            TextButton(onClick = onSignOut) { Text("Выйти из аккаунта") }
+            Divider(color = Color(0xFF303641), thickness = 1.dp)
+            Spacer(Modifier.height(10.dp))
+            Surface(
+                color = panel,
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.fillMaxWidth().clickable { showSettings = true }
+            ) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text(session.name, color = textMain, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                    Text("Аккаунт подключён", color = textMuted, style = MaterialTheme.typography.labelSmall)
+                }
+            }
+            TextButton(onClick = { showSettings = true }, modifier = Modifier.fillMaxWidth()) {
+                Text("⚙  Настройки", color = textMuted)
+            }
         }
 
-        Column(Modifier.weight(1f).fillMaxHeight()) {
+        Column(Modifier.weight(1f).fillMaxHeight().background(page)) {
+            // App bar
             Row(
-                Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface).padding(horizontal = 16.dp, vertical = 12.dp),
+                Modifier.fillMaxWidth().background(page).padding(start = 28.dp, end = 24.dp, top = 17.dp, bottom = 17.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column(Modifier.weight(1f)) {
-                    Text(activeChat.title, fontWeight = FontWeight.SemiBold)
-                    Text("${session.name} · $engineNote", style = MaterialTheme.typography.bodySmall, maxLines = 1)
+                    Text(activeChat.title, color = textMain, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Surface(color = Color(0xFF244B3A), shape = RoundedCornerShape(50)) {
+                            Box(Modifier.size(7.dp).padding(0.dp))
+                        }
+                        Spacer(Modifier.width(7.dp))
+                        Text(engineNote, color = textMuted, style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                    }
                 }
                 if (models.isNotEmpty()) {
                     var expanded by remember { mutableStateOf(false) }
                     Box {
-                        TextButton(onClick = { expanded = true }) { Text(model?.name ?: "Модель") }
+                        OutlinedButton(
+                            onClick = { expanded = true },
+                            shape = RoundedCornerShape(13.dp),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = textMain)
+                        ) { Text(model?.name ?: "Модель", maxLines = 1) }
                         DropdownMenu(expanded, onDismissRequest = { expanded = false }) {
                             models.take(100).forEach { m ->
                                 DropdownMenuItem(text = { Text(m.name) }, onClick = {
@@ -300,91 +533,213 @@ private fun ChatPane(session: AuthSession, oc: OpenCodeClient, onSignOut: () -> 
                             }
                         }
                     }
+                    Spacer(Modifier.width(10.dp))
+                }
+                OutlinedButton(
+                    onClick = onToggleFullscreen,
+                    shape = RoundedCornerShape(13.dp),
+                    contentPadding = PaddingValues(horizontal = 13.dp, vertical = 8.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = textMuted)
+                ) { Text("⛶") }
+            }
+            Divider(color = Color(0xFF252B35), thickness = 1.dp)
+
+            if (activeChat.messages.isEmpty()) {
+                Column(
+                    Modifier.weight(1f).fillMaxWidth().padding(32.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Surface(color = Color(0xFF202A3C), shape = RoundedCornerShape(24.dp)) {
+                        Text("✦", Modifier.padding(horizontal = 22.dp, vertical = 15.dp), color = accent, style = MaterialTheme.typography.headlineLarge)
+                    }
+                    Spacer(Modifier.height(22.dp))
+                    Text("С чего начнём?", color = textMain, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(8.dp))
+                    Text("Задай вопрос или выбери идею для начала", color = textMuted, style = MaterialTheme.typography.bodyLarge)
+                    Spacer(Modifier.height(25.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        listOf("Объясни сложную тему", "Помоги с кодом", "Придумай идею").forEach { suggestion ->
+                            OutlinedButton(
+                                onClick = { input = suggestion },
+                                shape = RoundedCornerShape(14.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = textMain),
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 11.dp)
+                            ) { Text(suggestion) }
+                        }
+                    }
+                }
+            } else {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 32.dp, vertical = 18.dp),
+                    verticalArrangement = Arrangement.spacedBy(18.dp)
+                ) {
+                    items(activeChat.messages, key = { it.id }) { msg ->
+                        Column(
+                            Modifier.fillMaxWidth(),
+                            horizontalAlignment = if (msg.isUser) Alignment.End else Alignment.Start
+                        ) {
+                            if (!msg.isUser) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Surface(color = Color(0xFF303B55), shape = RoundedCornerShape(8.dp)) {
+                                        Text("✦", Modifier.padding(horizontal = 7.dp, vertical = 4.dp), color = accent, style = MaterialTheme.typography.labelMedium)
+                                    }
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(msg.model ?: "YouCode", color = textMuted, style = MaterialTheme.typography.labelMedium)
+                                }
+                                Spacer(Modifier.height(7.dp))
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(
+                                    topStart = 18.dp, topEnd = 18.dp,
+                                    bottomStart = if (msg.isUser) 18.dp else 5.dp,
+                                    bottomEnd = if (msg.isUser) 5.dp else 18.dp
+                                ),
+                                color = if (msg.isUser) Color(0xFF34415D) else panel,
+                                modifier = Modifier.widthIn(max = 780.dp)
+                            ) {
+                                SelectionContainer {
+                                    Text(msg.text, Modifier.padding(horizontal = 18.dp, vertical = 14.dp), color = textMain, style = MaterialTheme.typography.bodyLarge)
+                                }
+                            }
+                            if (!msg.isUser) {
+                                var copied by remember(msg.id) { mutableStateOf(false) }
+                                TextButton(
+                                    onClick = {
+                                        runCatching { Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(msg.text), null) }
+                                        copied = true
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                ) { Text(if (copied) "Скопировано" else "Копировать", color = textMuted, style = MaterialTheme.typography.labelSmall) }
+                            }
+                        }
+                    }
+                    if (busy) {
+                        item {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = accent)
+                                Text(status.ifBlank { "Думает…" }, color = textMuted, style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                    }
                 }
             }
 
-            if (showServerSettings) {
-                Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            // Composer
+            Surface(color = page, shadowElevation = 8.dp) {
+                Column(Modifier.fillMaxWidth().padding(start = 28.dp, end = 28.dp, top = 10.dp, bottom = 18.dp)) {
+                    Surface(
+                        color = panel,
+                        shape = RoundedCornerShape(22.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF343C4A)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(Modifier.padding(start = 16.dp, end = 10.dp, top = 7.dp, bottom = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+                            OutlinedTextField(
+                                value = input,
+                                onValueChange = { input = it },
+                                modifier = Modifier.weight(1f).focusRequester(inputFocus).onPreviewKeyEvent { e ->
+                                    if (e.type == KeyEventType.KeyDown && e.key == Key.Enter && !e.isShiftPressed) {
+                                        sendMessage()
+                                        true
+                                    } else false
+                                },
+                                placeholder = { Text("Напиши сообщение…", color = textMuted) },
+                                enabled = !busy,
+                                maxLines = 5,
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = Color.Transparent,
+                                    unfocusedBorderColor = Color.Transparent,
+                                    disabledBorderColor = Color.Transparent,
+                                    focusedTextColor = textMain,
+                                    unfocusedTextColor = textMain,
+                                    cursorColor = accent
+                                )
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Button(
+                                onClick = { sendMessage() },
+                                enabled = !busy && input.isNotBlank(),
+                                shape = RoundedCornerShape(15.dp),
+                                modifier = Modifier.height(46.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD5DEFF), contentColor = Color(0xFF202B48))
+                            ) {
+                                Text(if (busy) "…" else "Отправить")
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(7.dp))
+                    Text("Enter — отправить · Shift+Enter — новая строка · YouCode может ошибаться", Modifier.align(Alignment.CenterHorizontally), color = Color(0xFF707987), style = MaterialTheme.typography.labelSmall)
+                }
+            }
+        }
+    }
+
+    if (showSettings) {
+        Box(
+            Modifier.fillMaxSize().background(Color(0xAA000000))
+                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { showSettings = false },
+            contentAlignment = Alignment.Center
+        ) {
+            Surface(
+                color = panel,
+                shape = RoundedCornerShape(22.dp),
+                modifier = Modifier.widthIn(max = 520.dp).fillMaxWidth().padding(24.dp)
+                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { }
+            ) {
+                Column(Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Настройки", color = textMain, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                        TextButton(onClick = { showSettings = false }) { Text("✕", color = textMuted) }
+                    }
+
+                    Text("АККАУНТ", color = textMuted, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    Surface(color = panelSoft, shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
+                        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(session.name, color = textMain, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                                Text("Аккаунт подключён", color = textMuted, style = MaterialTheme.typography.labelSmall)
+                            }
+                            OutlinedButton(
+                                onClick = { showSettings = false; onSignOut() },
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                            ) { Text("Выйти из аккаунта") }
+                        }
+                    }
+
+                    Spacer(Modifier.height(4.dp))
+                    Text("ПОДКЛЮЧЕНИЕ К OPENCODE", color = textMuted, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    Text(engineNote, color = textMuted, style = MaterialTheme.typography.bodySmall)
                     OutlinedTextField(serverUrl, { serverUrl = it }, modifier = Modifier.fillMaxWidth(), label = { Text("URL OpenCode") }, singleLine = true)
                     OutlinedTextField(serverPassword, { serverPassword = it }, modifier = Modifier.fillMaxWidth(), label = { Text("Пароль сервера (если нужен)") }, singleLine = true)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = {
+                    Button(
+                        onClick = {
                             runCatching { oc.connectExternal(serverUrl.trim(), serverPassword); if (oc.ping()) {
                                 scope.launch { models = oc.listModels(); model = models.firstOrNull(); engineNote = "Подключено: ${oc.baseUrl}" }
                             } else engineNote = "Не удалось подключиться к ${oc.baseUrl}" }
-                            showServerSettings = false
-                        }) { Text("Подключить") }
-                        TextButton(onClick = { showServerSettings = false }) { Text("Закрыть") }
-                    }
-                }
-            }
+                            showSettings = false
+                        },
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD5DEFF), contentColor = Color(0xFF202B48))
+                    ) { Text("Подключить") }
 
-            LazyColumn(
-                state = listState,
-                modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                items(activeChat.messages, key = { it.id }) { msg ->
-                    val bg = if (msg.isUser) Color(0xFF1E3A5F) else MaterialTheme.colorScheme.surface
-                    Column(Modifier.fillMaxWidth(), horizontalAlignment = if (msg.isUser) Alignment.End else Alignment.Start) {
-                        if (!msg.isUser && !msg.model.isNullOrBlank()) Text(msg.model!!, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
-                        Surface(shape = RoundedCornerShape(12.dp), color = bg) {
-                            SelectionContainer { Text(msg.text, Modifier.padding(12.dp)) }
-                        }
-                    }
-                }
-                if (busy) item { Text(status.ifBlank { "Думает…" }, color = MaterialTheme.colorScheme.primary) }
-            }
-
-            Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(
-                    value = input, onValueChange = { input = it }, modifier = Modifier.weight(1f),
-                    placeholder = { Text("Сообщение…") }, enabled = !busy,
-                    maxLines = 5
-                )
-                Spacer(Modifier.width(8.dp))
-                Button(onClick = {
-                    val prompt = input.trim()
-                    if (prompt.isEmpty() || busy) return@Button
-                    val selectedModel = model ?: models.firstOrNull()
-                    if (selectedModel == null) { status = "Нет доступных моделей. Проверь OpenCode."; return@Button }
-                    model = selectedModel
-                    val userMessage = Msg(java.util.UUID.randomUUID().toString(), prompt, true)
-                    val newTitle = if (activeChat.messages.isEmpty()) prompt.take(42).let { if (prompt.length > 42) "$it…" else it } else activeChat.title
-                    var workingChat = activeChat.copy(
-                        title = newTitle,
-                        messages = activeChat.messages + userMessage,
-                        modelId = selectedModel.id,
-                        providerId = selectedModel.providerId,
-                        modelName = selectedModel.name
+                    Spacer(Modifier.height(4.dp))
+                    Text("ОКНО", color = textMuted, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    OutlinedButton(
+                        onClick = { showSettings = false; onToggleFullscreen() },
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = textMain)
+                    ) { Text("Полноэкранный режим") }
+                    Text(
+                        "Enter — отправить · Shift+Enter — новая строка · Ctrl+N — новый чат · Esc — закрыть окно",
+                        color = textMuted,
+                        style = MaterialTheme.typography.labelSmall
                     )
-                    updateChat(workingChat)
-                    input = ""
-                    busy = true
-                    scope.launch {
-                        try {
-                            var sid = workingChat.openCodeSessionId
-                            if (sid.isNullOrBlank()) {
-                                status = "Создаю сессию…"
-                                sid = oc.createSession(workingChat.title, selectedModel)
-                                workingChat = workingChat.copy(openCodeSessionId = sid)
-                                updateChat(workingChat)
-                            }
-                            val answer = oc.chat(sid, selectedModel, prompt) { status = it }
-                            workingChat = workingChat.copy(messages = workingChat.messages + Msg(java.util.UUID.randomUUID().toString(), answer, false, selectedModel.name))
-                            updateChat(workingChat)
-                        } catch (e: CancellationException) {
-                            throw e
-                        } catch (e: Exception) {
-                            workingChat = workingChat.copy(messages = workingChat.messages + Msg(java.util.UUID.randomUUID().toString(), "Ошибка: ${e.message ?: "неизвестная ошибка"}", false))
-                            updateChat(workingChat)
-                        } finally {
-                            busy = false
-                            status = ""
-                        }
-                    }
-                }, enabled = !busy) { Text("Отправить") }
+                }
             }
         }
+    }
     }
 }

@@ -115,6 +115,17 @@ class AuthManager {
             sessionFile.delete()
             tmp.renameTo(sessionFile)
         }
+        // Keep the desktop token file readable only by the current OS user
+        // on filesystems that support POSIX permissions.
+        runCatching {
+            java.nio.file.Files.setPosixFilePermissions(
+                sessionFile.toPath(),
+                setOf(
+                    java.nio.file.attribute.PosixFilePermission.OWNER_READ,
+                    java.nio.file.attribute.PosixFilePermission.OWNER_WRITE
+                )
+            )
+        }
     }
 
     private fun sessionFrom(j: JSONObject): AuthSession {
