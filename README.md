@@ -7,7 +7,9 @@ Windows desktop AI chat client built with Kotlin, Compose Desktop and OpenCode C
 - Telegram sign-in.
 - Local OpenCode CLI startup or connection to an existing OpenCode server.
 - Windows npm OpenCode launch through `cmd.exe` to avoid Win32 CreateProcess error 193.
-- Full-screen toggle in the chat header; click it again to return to windowed mode.
+- Full-screen toggle in the chat header **and on the Telegram login screen**; F11 works everywhere.
+- Access to PC files: attach files/folders to a message (＋ Файл / Папка), set the agent work folder and full-access mode in Settings.
+- Detects LibreOffice, Blender, Python, FFmpeg, Git, Node.js and lets the agent use them; file paths in answers get "Открыть / В LibreOffice / В Blender / В папке" buttons.
 - Model selection.
 - Multiple conversations with local persistent history.
 - Each YouCode conversation keeps its own OpenCode session ID so follow-up prompts stay in the same context.

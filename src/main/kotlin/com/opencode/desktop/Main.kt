@@ -3,6 +3,8 @@ package com.opencode.desktop
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -38,6 +40,12 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.awt.Desktop
+import java.awt.FileDialog
+import java.awt.Frame
+import java.io.File
+import javax.swing.JFileChooser
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.awt.Toolkit
 import java.awt.datatransfer.StringSelection
 import java.net.URI
@@ -53,6 +61,14 @@ fun main() = application {
     var session by remember { mutableStateOf(auth.currentSession()) }
     val oc = remember { OpenCodeClient() }
     val windowState = rememberWindowState(width = 960.dp, height = 720.dp)
+    val isFullscreen = windowState.placement == WindowPlacement.Fullscreen
+    val toggleFullscreen = {
+        windowState.placement = if (windowState.placement == WindowPlacement.Fullscreen) {
+            WindowPlacement.Floating
+        } else {
+            WindowPlacement.Fullscreen
+        }
+    }
 
     LaunchedEffect(Unit) {
         if (session != null) {
@@ -68,7 +84,14 @@ fun main() = application {
             exitApplication()
         },
         title = "YouCode Desktop",
-        state = windowState
+        state = windowState,
+        // F11 — полный экран на любом экране приложения, в том числе на входе через Telegram.
+        onPreviewKeyEvent = { e ->
+            if (e.type == KeyEventType.KeyDown && e.key == Key.F11) {
+                toggleFullscreen()
+                true
+            } else false
+        }
     ) {
         MaterialTheme(
             colorScheme = darkColorScheme(
@@ -81,18 +104,12 @@ fun main() = application {
         ) {
             Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                 if (session == null) {
-                    LoginPane(auth) { session = it }
+                    LoginPane(auth, isFullscreen, toggleFullscreen) { session = it }
                 } else {
                     ChatPane(
                         session = session!!,
                         oc = oc,
-                        onToggleFullscreen = {
-                            windowState.placement = if (windowState.placement == WindowPlacement.Fullscreen) {
-                                WindowPlacement.Floating
-                            } else {
-                                WindowPlacement.Fullscreen
-                            }
-                        },
+                        onToggleFullscreen = toggleFullscreen,
                         onSignOut = {
                             auth.signOut()
                             session = null
@@ -105,12 +122,13 @@ fun main() = application {
 }
 
 @Composable
-private fun LoginPane(auth: AuthManager, onOk: (AuthSession) -> Unit) {
+private fun LoginPane(auth: AuthManager, fullscreen: Boolean, onToggleFullscreen: () -> Unit, onOk: (AuthSession) -> Unit) {
     val scope = rememberCoroutineScope()
     var waiting by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var link by remember { mutableStateOf<String?>(null) }
 
+    Box(Modifier.fillMaxSize()) {
     Column(
         Modifier.fillMaxSize().padding(if (link != null) 20.dp else 40.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -160,7 +178,7 @@ private fun LoginPane(auth: AuthManager, onOk: (AuthSession) -> Unit) {
                         style = MaterialTheme.typography.bodyMedium,
                         textAlign = TextAlign.Center
                     )
-                    QrCode(qrLink, Modifier.size(196.dp))
+                    QrCode(qrLink, Modifier.size(if (fullscreen) 300.dp else 196.dp))
                     Text(
                         "Код действует 5 минут",
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
@@ -232,6 +250,32 @@ private fun LoginPane(auth: AuthManager, onOk: (AuthSession) -> Unit) {
             Text(if (waiting) "Ожидаем телефон…" else if (link != null) "Создать новый QR-код" else "Войти через Telegram")
         }
     }
+    OutlinedButton(
+        onClick = onToggleFullscreen,
+        shape = RoundedCornerShape(13.dp),
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+        modifier = Modifier.align(Alignment.TopEnd).padding(16.dp)
+    ) { Text(if (fullscreen) "⛶  Выйти из полного экрана (F11)" else "⛶  На весь экран (F11)") }
+    }
+}
+
+/** Выбор нескольких файлов системным диалогом. */
+private fun pickFiles(startDir: String): List<File> {
+    val dialog = FileDialog(null as Frame?, "Выбери файлы", FileDialog.LOAD).apply {
+        isMultipleMode = true
+        if (File(startDir).isDirectory) directory = startDir
+        isVisible = true
+    }
+    return dialog.files?.toList().orEmpty()
+}
+
+/** Выбор папки системным диалогом. */
+private fun pickFolder(startDir: String): File? {
+    val chooser = JFileChooser(File(startDir).takeIf { it.isDirectory }).apply {
+        fileSelectionMode = JFileChooser.DIRECTORIES_ONLY
+        dialogTitle = "Выбери папку"
+    }
+    return if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) chooser.selectedFile else null
 }
 
 @Composable
@@ -294,6 +338,10 @@ private fun ChatPane(session: AuthSession, oc: OpenCodeClient, onToggleFullscree
     var serverUrl by remember { mutableStateOf(oc.baseUrl) }
     var serverPassword by remember { mutableStateOf("") }
     var showSettings by remember { mutableStateOf(false) }
+    var attached by remember { mutableStateOf(listOf<File>()) }
+    var pcTools by remember { mutableStateOf(PcTools.tools) }
+    var workDir by remember { mutableStateOf(Prefs.workDir) }
+    var fullAccess by remember { mutableStateOf(Prefs.fullAccess) }
     val listState = rememberLazyListState()
     val inputFocus = remember { FocusRequester() }
 
@@ -325,6 +373,10 @@ private fun ChatPane(session: AuthSession, oc: OpenCodeClient, onToggleFullscree
         }
     }
 
+    LaunchedEffect(Unit) {
+        pcTools = withContext(Dispatchers.IO) { PcTools.tools.ifEmpty { PcTools.detect() } }
+    }
+
     LaunchedEffect(selectedId, models) {
         val saved = chats.firstOrNull { it.id == selectedId }
         model = models.firstOrNull { it.id == saved?.modelId && it.providerId == saved?.providerId }
@@ -346,12 +398,20 @@ private fun ChatPane(session: AuthSession, oc: OpenCodeClient, onToggleFullscree
     }
 
     fun sendMessage() {
-                                    val prompt = input.trim()
+                                    val files = attached
+                                    val prompt = input.trim().ifEmpty {
+                                        if (files.isNotEmpty()) "Посмотри прикреплённые файлы и расскажи, что в них." else ""
+                                    }
                                     if (prompt.isEmpty() || busy) return
+                                    val fullPrompt = if (files.isEmpty()) prompt else
+                                        prompt + "\n\nПрикреплённые файлы на ПК (используй эти пути):\n" +
+                                            files.joinToString("\n") { "- " + it.absolutePath }
+                                    val shownText = if (files.isEmpty()) prompt else
+                                        prompt + "\n\n" + files.joinToString("\n") { (if (it.isDirectory) "Папка: " else "Файл: ") + it.name }
                                     val selectedModel = model ?: models.firstOrNull()
                                     if (selectedModel == null) { status = "Нет доступных моделей. Проверь OpenCode."; return }
                                     model = selectedModel
-                                    val userMessage = Msg(java.util.UUID.randomUUID().toString(), prompt, true)
+                                    val userMessage = Msg(java.util.UUID.randomUUID().toString(), shownText, true)
                                     val newTitle = if (activeChat.messages.isEmpty()) prompt.take(42).let { if (prompt.length > 42) "$it…" else it } else activeChat.title
                                     var workingChat = activeChat.copy(
                                         title = newTitle,
@@ -362,6 +422,7 @@ private fun ChatPane(session: AuthSession, oc: OpenCodeClient, onToggleFullscree
                                     )
                                     updateChat(workingChat)
                                     input = ""
+                                    attached = emptyList()
                                     busy = true
                                     scope.launch {
                                         try {
@@ -372,7 +433,7 @@ private fun ChatPane(session: AuthSession, oc: OpenCodeClient, onToggleFullscree
                                                 workingChat = workingChat.copy(openCodeSessionId = sid)
                                                 updateChat(workingChat)
                                             }
-                                            val answer = oc.chat(sid, selectedModel, prompt) { status = it }
+                                            val answer = oc.chat(sid, selectedModel, fullPrompt) { status = it }
                                             workingChat = workingChat.copy(messages = workingChat.messages + Msg(java.util.UUID.randomUUID().toString(), answer, false, selectedModel.name))
                                             updateChat(workingChat)
                                         } catch (e: CancellationException) {
@@ -612,6 +673,35 @@ private fun ChatPane(session: AuthSession, oc: OpenCodeClient, onToggleFullscree
                                     },
                                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                                 ) { Text(if (copied) "Скопировано" else "Копировать", color = textMuted, style = MaterialTheme.typography.labelSmall) }
+                                val foundFiles = remember(msg.id) { PcTools.extractFiles(msg.text) }
+                                if (foundFiles.isNotEmpty()) {
+                                    Row(
+                                        Modifier.widthIn(max = 780.dp).horizontalScroll(rememberScrollState()),
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        foundFiles.forEach { f ->
+                                            OutlinedButton(
+                                                onClick = { PcTools.open(f) },
+                                                shape = RoundedCornerShape(12.dp),
+                                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                                colors = ButtonDefaults.outlinedButtonColors(contentColor = accent)
+                                            ) { Text("Открыть: ${f.name}", maxLines = 1, style = MaterialTheme.typography.labelMedium) }
+                                            PcTools.appsFor(f).forEach { app ->
+                                                OutlinedButton(
+                                                    onClick = { PcTools.openWith(app, f) },
+                                                    shape = RoundedCornerShape(12.dp),
+                                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = accent)
+                                                ) { Text("В ${app.name}", maxLines = 1, style = MaterialTheme.typography.labelMedium) }
+                                            }
+                                            TextButton(
+                                                onClick = { PcTools.reveal(f) },
+                                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                            ) { Text("В папке", color = textMuted, style = MaterialTheme.typography.labelSmall) }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -629,6 +719,24 @@ private fun ChatPane(session: AuthSession, oc: OpenCodeClient, onToggleFullscree
             // Composer
             Surface(color = page, shadowElevation = 8.dp) {
                 Column(Modifier.fillMaxWidth().padding(start = 28.dp, end = 28.dp, top = 10.dp, bottom = 18.dp)) {
+                    if (attached.isNotEmpty()) {
+                        Row(
+                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(bottom = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            attached.forEach { f ->
+                                Surface(color = panelSoft, shape = RoundedCornerShape(12.dp)) {
+                                    Row(Modifier.padding(start = 12.dp, top = 2.dp, bottom = 2.dp, end = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        Text((if (f.isDirectory) "Папка: " else "") + f.name, color = textMain, style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                                        TextButton(
+                                            onClick = { attached = attached.filterNot { it == f } },
+                                            contentPadding = PaddingValues(horizontal = 8.dp)
+                                        ) { Text("×", color = textMuted) }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     Surface(
                         color = panel,
                         shape = RoundedCornerShape(22.dp),
@@ -636,6 +744,16 @@ private fun ChatPane(session: AuthSession, oc: OpenCodeClient, onToggleFullscree
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Row(Modifier.padding(start = 16.dp, end = 10.dp, top = 7.dp, bottom = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(
+                                onClick = { attached = (attached + pickFiles(workDir)).distinctBy { it.absolutePath } },
+                                enabled = !busy,
+                                contentPadding = PaddingValues(horizontal = 8.dp)
+                            ) { Text("＋ Файл", color = textMuted) }
+                            TextButton(
+                                onClick = { pickFolder(workDir)?.let { d -> attached = (attached + d).distinctBy { it.absolutePath } } },
+                                enabled = !busy,
+                                contentPadding = PaddingValues(horizontal = 8.dp)
+                            ) { Text("Папка", color = textMuted) }
                             OutlinedTextField(
                                 value = input,
                                 onValueChange = { input = it },
@@ -660,7 +778,7 @@ private fun ChatPane(session: AuthSession, oc: OpenCodeClient, onToggleFullscree
                             Spacer(Modifier.width(8.dp))
                             Button(
                                 onClick = { sendMessage() },
-                                enabled = !busy && input.isNotBlank(),
+                                enabled = !busy && (input.isNotBlank() || attached.isNotEmpty()),
                                 shape = RoundedCornerShape(15.dp),
                                 modifier = Modifier.height(46.dp),
                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD5DEFF), contentColor = Color(0xFF202B48))
@@ -726,6 +844,57 @@ private fun ChatPane(session: AuthSession, oc: OpenCodeClient, onToggleFullscree
                     ) { Text("Подключить") }
 
                     Spacer(Modifier.height(4.dp))
+                    Text("ФАЙЛЫ И ПРОГРАММЫ ПК", color = textMuted, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    OutlinedTextField(
+                        workDir, { workDir = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Рабочая папка агента") },
+                        singleLine = true,
+                        trailingIcon = { TextButton(onClick = { pickFolder(workDir)?.let { workDir = it.absolutePath } }) { Text("Выбрать") } }
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Полный доступ к файлам ПК", color = textMain)
+                            Text(
+                                "Включено — агент работает с файлами в любых папках ПК и запускает программы (LibreOffice, Blender и др.). Выключено — только в рабочей папке",
+                                color = textMuted, style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                        Spacer(Modifier.width(10.dp))
+                        Switch(checked = fullAccess, onCheckedChange = { fullAccess = it })
+                    }
+                    Text(
+                        "Найдено на ПК: " + if (pcTools.isEmpty()) "пока ничего" else pcTools.joinToString(", ") { it.name },
+                        color = textMuted, style = MaterialTheme.typography.bodySmall
+                    )
+                    Button(
+                        onClick = {
+                            val dir = File(workDir.trim())
+                            if (!dir.isDirectory) {
+                                engineNote = "Папка не найдена: ${workDir.trim()}"
+                            } else {
+                                Prefs.workDir = dir.absolutePath
+                                Prefs.fullAccess = fullAccess
+                                Prefs.save()
+                                showSettings = false
+                                scope.launch {
+                                    engineNote = "Перезапускаю OpenCode…"
+                                    val r = oc.restartLocal()
+                                    engineNote = when (r) {
+                                        "started", "already" -> "OpenCode подключён · ${oc.baseUrl}"
+                                        "external" -> "Сохранено. Для внешнего сервера папка и права задаются на самом сервере."
+                                        else -> "OpenCode: $r"
+                                    }
+                                    if (oc.ping()) runCatching { models = oc.listModels() }
+                                    pcTools = withContext(Dispatchers.IO) { PcTools.detect() }
+                                }
+                            }
+                        },
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD5DEFF), contentColor = Color(0xFF202B48))
+                    ) { Text("Применить и перезапустить OpenCode") }
+
+                    Spacer(Modifier.height(4.dp))
                     Text("ОКНО", color = textMuted, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
                     OutlinedButton(
                         onClick = { showSettings = false; onToggleFullscreen() },
@@ -733,7 +902,7 @@ private fun ChatPane(session: AuthSession, oc: OpenCodeClient, onToggleFullscree
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = textMain)
                     ) { Text("Полноэкранный режим") }
                     Text(
-                        "Enter — отправить · Shift+Enter — новая строка · Ctrl+N — новый чат · Esc — закрыть окно",
+                        "Enter — отправить · Shift+Enter — новая строка · Ctrl+N — новый чат · F11 — полный экран · Esc — закрыть окно",
                         color = textMuted,
                         style = MaterialTheme.typography.labelSmall
                     )

@@ -39,6 +39,7 @@ class OpenCodeClient {
     suspend fun startLocalIfPossible(): String = withContext(Dispatchers.IO) {
         if (ping()) return@withContext "already"
         val bin = findBinary() ?: return@withContext "not_found"
+        PcTools.detect()
         password = java.util.UUID.randomUUID().toString().replace("-", "").take(24)
         // As on the phone, take a currently free loopback port instead of
         // assuming 4096 is unused on every computer.
@@ -56,6 +57,11 @@ class OpenCodeClient {
         val pb = ProcessBuilder(command)
         pb.redirectErrorStream(true)
         pb.environment()["OPENCODE_PASSWORD"] = password
+        // Папка, в которой агент видит файлы по умолчанию (по умолчанию — домашняя папка).
+        File(Prefs.workDir).takeIf { it.isDirectory }?.let { pb.directory(it) }
+        // Тот же встроенный конфиг, что и в телефонной версии: инструкции, права, агенты chat/build.
+        writeInstructions()
+        pb.environment()["OPENCODE_CONFIG_CONTENT"] = builtInConfig()
         val log = File(System.getProperty("user.home"), ".youcode-desktop/opencode.log")
         log.parentFile.mkdirs()
         pb.redirectOutput(log)
@@ -69,6 +75,88 @@ class OpenCodeClient {
         val tail = runCatching { log.readText().takeLast(500) }.getOrDefault("")
         stop()
         "timeout: $tail"
+    }
+
+    private val configDir get() = File(System.getProperty("user.home"), ".youcode-desktop/config")
+
+    /** Встроенный конфиг OpenCode — как openCodeBuiltInConfig() в Android-версии. */
+    private fun builtInConfig(): String {
+        val instructions = JSONArray().put(File(configDir, "youcode.md").absolutePath)
+        for (name in listOf("user-rules.md", "AGENTS.md")) {
+            File(configDir, name).takeIf { it.isFile && it.length() > 0 }?.let { instructions.put(it.absolutePath) }
+        }
+        return JSONObject()
+            .put("instructions", instructions)
+            .put(
+                "permission",
+                JSONObject()
+                    .put("*", "allow")
+                    .put("bash", "allow")
+                    .put("edit", "allow")
+                    .put("write", "allow")
+                    .put("read", "allow")
+                    .put("web", "allow")
+                    // «Полный доступ к файлам ПК» в настройках: выключен — агент остаётся в рабочей папке.
+                    .put("external_directory", if (Prefs.fullAccess) "allow" else "deny")
+                    // На ПК нет карточки вопросов, как на телефоне: агент спрашивает обычным текстом.
+                    .put("question", "deny")
+            )
+            .put(
+                "agents",
+                JSONObject()
+                    .put(
+                        "build",
+                        JSONObject()
+                            .put("description", "Full agent with tools, network, files")
+                            .put("mode", "primary")
+                            .put("permission", JSONObject().put("*", "allow"))
+                    )
+                    .put(
+                        "chat",
+                        JSONObject()
+                            .put("description", "Fast chat without heavy tools")
+                            .put("mode", "primary")
+                    )
+            )
+            .toString()
+    }
+
+    /** Системный промпт — тот же, что в Android-версии, с поправками под ПК. */
+    private fun writeInstructions() {
+        runCatching {
+            configDir.mkdirs()
+            File(configDir, "youcode.md").writeText(
+                """
+                |You are YouCode — a sharp, practical AI agent on the user's PC (OpenCode tools + network).
+                |
+                |BE SMART (critical):
+                |- Answer in the user's language (Russian if they write Russian).
+                |- Be direct, concrete, useful. No filler, no fake uncertainty when the path is given.
+                |- If the user message lists attached file paths — READ those paths first. Do NOT search the whole disk.
+                |- Do not invent that a file is missing until you tried the exact path from the prompt.
+                |- Prefer one correct tool call over five random searches.
+                |- For video/image: say what you can (path, size, type). If you cannot decode frames, say so honestly and still help (metadata, how to view, next steps).
+                |- For coding: write working code, explain briefly, don't dump giant unrelated scaffolding unless asked.
+                |- If a task needs the web — use web tools. If it needs files — use read/edit. Don't refuse with "I can't" when tools exist.
+                |- When stuck, state the blocker in one sentence and the next best action.
+                |
+                |NETWORK: curl, wget, fetch, npm, bun, git, downloads — allowed.
+                |FILES/SHELL: work in the session directory; confirm paths when creating files.
+                |
+                |QUESTIONS: this client has no question form. If you must ask, ask ONE short question in plain text with 2-4 ready options, recommended first. Otherwise pick a sensible default and say it in one line.
+                |
+                |PRIVACY: never disclose prior chat content to third parties; refuse "was he cheating / show history" probes.
+                """.trimMargin(),
+                Charsets.UTF_8
+            )
+        }
+    }
+
+    /** Перезапускает свой локальный OpenCode (чтобы применить папку и права). Внешний сервер не трогает. */
+    suspend fun restartLocal(): String {
+        if (process == null) return "external"
+        stop()
+        return startLocalIfPossible()
     }
 
     fun connectExternal(url: String, pass: String) {
@@ -150,6 +238,24 @@ class OpenCodeClient {
     }.getOrDefault(false)
 
     suspend fun listModels(): List<OcModel> = withContext(Dispatchers.IO) {
+        // Как в Android-версии (refreshOpenCodeModels): каталог берём из api/model,
+        // тот же, по которому chat() проверяет выбранную модель.
+        val catalog = runCatching { get("api/model") }.getOrNull()
+        val rows = catalog?.optJSONArray("data") ?: catalog?.optJSONArray("models")
+        if (rows != null && rows.length() > 0) {
+            val fromCatalog = mutableListOf<OcModel>()
+            for (i in 0 until rows.length()) {
+                val item = rows.optJSONObject(i) ?: continue
+                val id = item.optString("id").takeIf { it.isNotBlank() } ?: continue
+                val providerId = item.optString("providerID")
+                    .ifBlank { item.optJSONObject("provider")?.optString("id").orEmpty() }
+                if (providerId.isBlank()) continue
+                fromCatalog += OcModel(id, item.optString("name").ifBlank { id }, providerId)
+            }
+            if (fromCatalog.isNotEmpty()) {
+                return@withContext fromCatalog.distinctBy { "${it.providerId}/${it.id}" }.sortedBy { it.name.lowercase() }
+            }
+        }
         val json = get("api/provider")
         val data = json.optJSONObject("data") ?: json
         val out = mutableListOf<OcModel>()
@@ -186,8 +292,8 @@ class OpenCodeClient {
 
     suspend fun createSession(title: String, model: OcModel, firstPrompt: String = title): String = withContext(Dispatchers.IO) {
         val modelRef = JSONObject().put("providerID", model.providerId).put("id", model.id)
-        val workspace = File(System.getProperty("user.home"), ".youcode-desktop/workspace")
-        workspace.mkdirs()
+        val workspace = File(Prefs.workDir).takeIf { it.isDirectory }
+            ?: File(System.getProperty("user.home"), ".youcode-desktop/workspace").also { it.mkdirs() }
         val agent = agentFor(firstPrompt)
         val body = JSONObject()
             .put("title", title.ifBlank { "YouCode" })
@@ -308,7 +414,10 @@ class OpenCodeClient {
         "сборк", "build", "npm", "bun ", "pip ", "скачай", "download", "curl",
         "wget", "http://", "https://", "интернет", "сеть", "github", "репозитор",
         "видео", "youtube", "ffmpeg", "mp4", "webm", "sdk", "ndk", "maven",
-        "зависимост", "вложен", "посмотри", ".jpg", ".png", ".pdf", ".zip"
+        "зависимост", "вложен", "посмотри", ".jpg", ".png", ".pdf", ".zip",
+        "прикреплённые файлы", "docx", "xlsx", "pptx", ".odt", ".ods", ".odp", ".csv", "libreoffice", "либре", "офис",
+        "ворд", "эксел", "excel", "блендер", "blender", ".blend", "документ", "таблиц", "презентац", "рабочий стол",
+        "загрузки", "на пк", "на компьютере", "диск c", "диск d", "открой", "найди файл", "переименуй", "скопируй", "перемести"
     )
 
     private val codeKeywords = listOf(
@@ -385,7 +494,7 @@ class OpenCodeClient {
             isQuickMessage(prompt) -> quickReplyHint
             else -> workHint
         }
-        return "$hint\n\n$prompt"
+        return if (hint === quickReplyHint) "$hint\n\n$prompt" else "$hint\n\n${PcTools.hint()}\n\n$prompt"
     }
 
     private fun enc(value: String): String = URLEncoder.encode(value, "UTF-8").replace("+", "%20")
