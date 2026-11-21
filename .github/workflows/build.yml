@@ -37,19 +37,40 @@ jobs:
           $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
             Where-Object { $_.FullName -match "\\x64\\" } | Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $signtool) { $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe | Select-Object -First 1 }
-          if (-not $signtool) { throw "signtool.exe not found" }
           Write-Host "signtool: $($signtool.FullName)"
 
           $exe = Get-ChildItem -Recurse -Filter YouCode.exe build\compose | Select-Object -First 1
           if (-not $exe) { throw "YouCode.exe not found under build\compose" }
-          Write-Host "exe: $($exe.FullName)"
+          $src = $exe.FullName
+          Write-Host "exe: $src"
 
-          & $signtool.FullName sign /f $pfx /p $pass /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /d "YouCode" "$($exe.FullName)"
-          if ($LASTEXITCODE -ne 0) { throw "signtool sign failed with exit code $LASTEXITCODE" }
+          # sign a copy first: Defender can hold a lock on a freshly built exe
+          $tmp = Join-Path $env:RUNNER_TEMP "YouCode-signed.exe"
+          Copy-Item $src $tmp -Force
+          Set-ItemProperty $tmp -Name IsReadOnly -Value $false
+          Start-Sleep -Seconds 5
 
+          $ok = $false
+          for ($i = 1; $i -le 3; $i++) {
+            Write-Host "signtool attempt $i"
+            & $signtool.FullName sign /f $pfx /p $pass /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /d "YouCode" $tmp
+            if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+            Start-Sleep -Seconds 10
+          }
+
+          if (-not $ok) {
+            Write-Host "signtool failed, falling back to Set-AuthenticodeSignature"
+            $sec = ConvertTo-SecureString $pass -AsPlainText -Force
+            $cert = Get-PfxCertificate -FilePath $pfx -Password $sec
+            Set-AuthenticodeSignature -FilePath $tmp -Certificate $cert -TimestampServer "http://timestamp.digicert.com" -HashAlgorithm SHA256 | Out-Null
+            if (-not (Get-AuthenticodeSignature $tmp).SignerCertificate) { throw "signing failed" }
+          }
+
+          Copy-Item $tmp $src -Force
           Write-Host "--- signature ---"
-          & $signtool.FullName verify /pa "$($exe.FullName)"
-          Get-AuthenticodeSignature "$($exe.FullName)" | Format-List Status,StatusMessage,@{n='Subject';e={$_.SignerCertificate.Subject}}
+          Get-AuthenticodeSignature $src | Format-List Status,StatusMessage,@{n='Subject';e={$_.SignerCertificate.Subject}},@{n='Thumbprint';e={$_.SignerCertificate.Thumbprint}}
+          if ((Get-AuthenticodeSignature $src).Status -ne "UnknownError" -and (Get-AuthenticodeSignature $src).SignerCertificate -eq $null) { throw "no signature on exe" }
+          if ((Get-AuthenticodeSignature $src).SignerCertificate -eq $null) { throw "no signature on exe" }
 
       - name: Zip app folder with YouCode.exe
         shell: pwsh
