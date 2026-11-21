@@ -35,7 +35,7 @@ compose.desktop {
             packageName = "YouCode"
             packageVersion = "1.0.0"
             description = "YouCode for Desktop — OpenCode chat with Telegram login"
-            vendor = "Upin Studio"
+            vendor = "YtakezDev"
             windows {
                 iconFile = project.file("src/main/resources/icon.ico")
             }
